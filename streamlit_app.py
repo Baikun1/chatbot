@@ -109,22 +109,30 @@ def generate_technical_questions(tech_stack, experience):
                 )
                 
                 if response.status_code == 200:
-                    questions.append({
-                        "technology": tech,
-                        "questions": response.json()[0]['generated_text'],
-                        "answers": [],
-                        "response_times": [],
-                        "start_time": None
-                    })
-                    break
+                    try:
+                        generated_text = response.json()[0]['generated_text']
+                        questions.append({
+                            "technology": tech,
+                            "questions": generated_text,
+                            "answers": [],
+                            "response_times": [],
+                            "start_time": None
+                        })
+                        break
+                    except (KeyError, IndexError, json.JSONDecodeError) as e:
+                        st.error(f"Failed to parse API response: {str(e)}")
+                        time.sleep(5)
+                        continue
                 elif response.status_code == 503:
                     time.sleep(15)  # Wait for model to load
                 else:
-                    st.error(f"API Error: {response.text}")
-                    break
+                    st.error(f"API Error ({response.status_code}): {response.text}")
+                    if response.status_code in [429, 502]:  # Rate limit or bad gateway
+                        time.sleep(30)
+                    continue
             except requests.exceptions.RequestException as e:
                 st.error(f"Connection error: {str(e)}")
-                time.sleep(5)
+                time.sleep(10)
     
     return questions
 
@@ -180,19 +188,19 @@ def render_sidebar():
 # Conversation steps
 steps = [
     {"prompt": "👋 Hello! I'm TalentScout Hiring Assistant. Let's start with your full name.", 
-     "key": "name", "validator": lambda x: len(x) >= 3},
+     "key": "name", "validator": lambda x: len(x) >= 3, "timestamp": None},
     {"prompt": "📧 What's your email address?", 
-     "key": "email", "validator": validate_email},
+     "key": "email", "validator": validate_email, "timestamp": None},
     {"prompt": "📱 Please share your phone number (international format):", 
-     "key": "phone", "validator": validate_phone},
+     "key": "phone", "validator": validate_phone, "timestamp": None},
     {"prompt": "⏳ How many years of professional experience do you have?", 
-     "key": "years_exp", "validator": validate_experience},
+     "key": "years_exp", "validator": validate_experience, "timestamp": None},
     {"prompt": "💼 What position are you applying for?", 
-     "key": "desired_position", "validator": lambda x: len(x) >= 2},
+     "key": "desired_position", "validator": lambda x: len(x) >= 2, "timestamp": None},
     {"prompt": "📍 Where are you currently located?", 
-     "key": "location", "validator": lambda x: len(x) >= 2},
+     "key": "location", "validator": lambda x: len(x) >= 2, "timestamp": None},
     {"prompt": "🛠️ List your technical expertise (comma-separated):\nExamples: Python, React, AWS", 
-     "key": "tech_stack", "validator": lambda x: len(x) >= 1},
+     "key": "tech_stack", "validator": lambda x: len([t.strip() for t in x.split(",") if t.strip()]) >= 1, "timestamp": None},
 ]
 
 # Main UI
@@ -260,6 +268,7 @@ elif current_step < len(steps):
     
     # Show current question if not already displayed
     if not any(m["content"] == step["prompt"] for m in st.session_state.session["messages"]):
+        step["timestamp"] = time.time()  # Record when question was asked
         st.session_state.session["messages"].append({
             "role": "assistant",
             "content": step["prompt"],
@@ -331,7 +340,6 @@ if user_input := st.chat_input("Type your response..."):
                     )
                     st.session_state.session["active_question_index"] = 0
                     st.session_state.session["question_start_time"] = time.time()
-            
             st.rerun()
 
 # Session timeout handling
