@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Prompt Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center">
+  <div class="bg-gray-800 p-8 rounded-2xl shadow-xl w-full max-w-xl">
+    <h1 class="text-3xl font-bold mb-6 text-center text-indigo-400">🧠 AI Prompt Generator</h1>
+
+    <!-- Role Input -->
+    <label class="block mb-2 text-sm font-semibold">Choose a Role:</label>
+    <select id="role" class="w-full p-2 rounded bg-gray-700 text-white mb-4">
+      <option value="">-- Select --</option>
+      <option>Frontend Developer</option>
+      <option>Backend Developer</option>
+      <option>Full Stack Developer</option>
+      <option>Data Analyst</option>
+      <option>DevOps Engineer</option>
+      <option>Machine Learning Engineer</option>
+      <option value="custom">Other (Type Below)</option>
+    </select>
+
+    <!-- Custom Role Input -->
+    <input type="text" id="customRole" placeholder="Enter custom role..." 
+           class="w-full p-2 rounded bg-gray-700 text-white mb-4 hidden"/>
+
+    <!-- Skills Input -->
+    <label class="block mb-2 text-sm font-semibold">Enter Skills or Experience:</label>
+    <input type="text" id="skills" placeholder="e.g., React, Docker, Pandas, REST APIs" 
+           class="w-full p-2 rounded bg-gray-700 text-white mb-4"/>
+
+    <!-- Generate Button -->
+    <button onclick="generatePrompt()"
+            class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2 px-4 rounded mb-4 transition">
+      🚀 Generate Questions
+    </button>
+
+    <!-- Output Section -->
+    <div id="output" class="mt-4 space-y-4"></div>
+  </div>
+
+  <script>
+    const roleDropdown = document.getElementById("role");
+    const customRoleInput = document.getElementById("customRole");
+    const output = document.getElementById("output");
+
+    roleDropdown.addEventListener("change", () => {
+      customRoleInput.style.display = (roleDropdown.value === "custom") ? "block" : "none";
+    });
+
+    function generateQuestion(role, skills) {
+      return `As a ${role}, how would you apply your skills in ${skills} to solve a real-world problem? 
+Explain your thought process, tools you'd use, and how you'd ensure the solution is scalable and efficient.`;
+    }
+
+    async function generatePrompt() {
+      output.innerHTML = ""; // Clear previous questions
+
+      const selectedRole = roleDropdown.value;
+      const customRole = customRoleInput.value.trim();
+      const skills = document.getElementById("skills").value.trim();
+
+      const role = selectedRole === "custom" || selectedRole === "" ? customRole : selectedRole;
+
+      if (!role || !skills) {
+        output.innerHTML = `<p class="text-red-400 font-semibold">Please provide both a role and at least one skill.</p>`;
+        return;
+      }
+
+      for (let i = 0; i < 3; i++) {
+        const question = generateQuestion(role, skills);
+        const questionElement = document.createElement("div");
+        questionElement.className = "bg-gray-700 p-4 rounded-lg border border-indigo-400";
+        questionElement.innerHTML = `<strong>Q${i + 1}:</strong> ${question}`;
+        output.appendChild(questionElement);
+
+        await new Promise(resolve => setTimeout(resolve, 1000)); // delay between questions
+      }
+    }
+  </script>
+</body>
+</html>

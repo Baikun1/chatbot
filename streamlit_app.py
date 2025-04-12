@@ -2,49 +2,134 @@ import os
 import re
 import json
 import time
+import html
 import streamlit as st
 import requests
-from datetime import datetime
 from dotenv import load_dotenv
+from functools import wraps
 
 # Load environment variables
 load_dotenv()
 
-# Configuration
+# Configuration constants
 HF_API_TOKEN = os.getenv('HF_API_TOKEN')
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.1"
 API_URL = f"https://api-inference.huggingface.co/models/{MODEL_NAME}"
 DATA_FILE = "candidates.json"
-SESSION_TIMEOUT = 300  # 5 minutes for technical questions
 MAX_RETRIES = 3
+MAX_INVALID_ATTEMPTS = 2
+INITIAL_BACKOFF = 5  # seconds
 
-# Initialize session state structure
+# Position categories and attributes remain as before
+POSITION_CATEGORIES = {
+    "Technical": [
+        "Software Engineer", "Data Scientist", "DevOps Engineer",
+        "Frontend Developer", "Backend Developer", "Full Stack Developer"
+    ],
+    "Non-Technical": [
+        "CEO", "Manager", "HR Executive",
+        "Security Guard", "Cleaner", "Watchman",
+        "Receptionist", "Driver", "Office Assistant"
+    ]
+}
+
+POSITION_ATTRIBUTES = {
+    "Software Engineer": {
+        "skills": ["Python", "Java", "C++", "Algorithms", "System Design"],
+        "question_type": "technical"
+    },
+    "Data Scientist": {
+        "skills": ["Python", "SQL", "Machine Learning", "Statistics", "Pandas"],
+        "question_type": "technical"
+    },
+    "CEO": {
+        "skills": ["Leadership", "Strategy", "Decision Making"],
+        "question_type": "behavioral"
+    },
+    "Security Guard": {
+        "skills": ["Vigilance", "Emergency Response", "Observation"],
+        "question_type": "situational"
+    },
+    "Cleaner": {
+        "skills": ["Attention to Detail", "Time Management", "Chemical Safety"],
+        "question_type": "procedural"
+    }
+}
+
+# --- Caching Decorator for API Responses ---
+def cache_api_call(func):
+    cache = {}
+    @wraps(func)
+    def wrapper(prompt):
+        if prompt in cache:
+            return cache[prompt]
+        result = func(prompt)
+        cache[prompt] = result
+        return result
+    return wrapper
+
+@cache_api_call
+def call_hf_api(prompt):
+    backoff = INITIAL_BACKOFF
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = requests.post(
+                API_URL,
+                headers={"Authorization": f"Bearer {HF_API_TOKEN}"},
+                json={
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_new_tokens": 300,
+                        "temperature": 0.7,
+                        "return_full_text": False
+                    }
+                },
+                timeout=30
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data and isinstance(data, list) and "generated_text" in data[0]:
+                    return data[0]['generated_text']
+                else:
+                    st.warning("Received empty API response. Retrying...")
+            elif response.status_code == 503:
+                st.warning("Service unavailable. Waiting for model to load...")
+            else:
+                st.error(f"API Error ({response.status_code}): {response.text}")
+            time.sleep(backoff)
+            backoff *= 2  # exponential backoff
+        except requests.exceptions.RequestException as e:
+            st.error(f"Connection error: {str(e)}")
+            time.sleep(backoff)
+            backoff *= 2
+    return ""  # Fallback: return empty string after MAX_RETRIES
+
+# --- Session State Initialization ---
 def init_session_state():
     return {
         "messages": [],
         "current_step": 0,
+        "invalid_attempts": {},
         "candidate_info": {
             "name": "",
             "email": "",
             "phone": "",
             "years_exp": "",
             "desired_position": "",
+            "position_type": "",  # Optional, can be inferred
             "location": "",
-            "tech_stack": [],
-            "technical_responses": {},
-            "timings": {},
+            "skills": [],
+            "responses": {},
             "sentiment": []
         },
-        "tech_questions": [],
-        "active_question_index": 0,
-        "question_start_time": None,
-        "session_start": time.time()
+        "questions": [],
+        "active_question_index": 0
     }
 
 if "session" not in st.session_state:
     st.session_state.session = init_session_state()
 
-# Validation functions
+# --- Validation Functions ---
 def validate_email(email):
     return re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", email)
 
@@ -57,126 +142,80 @@ def validate_experience(years):
     except ValueError:
         return False
 
-# Sentiment analysis (enhanced dummy implementation)
-def analyze_sentiment(text):
-    positive = ["great", "excellent", "love", "happy", "thanks"]
-    negative = ["hate", "bad", "terrible", "frustrating", "annoying"]
-    
-    text_lower = text.lower()
-    pos_count = sum(1 for word in positive if word in text_lower)
-    neg_count = sum(1 for word in negative if word in text_lower)
-    
-    if pos_count > neg_count: return "positive"
-    if neg_count > pos_count: return "negative"
-    return "neutral"
-
-# Data handling
-def save_candidate_data():
-    try:
-        data = st.session_state.session["candidate_info"].copy()
-        # Redact sensitive information
-        data["email"] = "[REDACTED]"
-        data["phone"] = "[REDACTED]"
-        
-        with open(DATA_FILE, "a") as f:
-            json.dump(data, f)
-            f.write("\n")
-    except Exception as e:
-        st.error(f"Failed to save data: {str(e)}")
-
-# Question generation with retries
-def generate_technical_questions(tech_stack, experience):
+# --- Generate Interview Questions ---
+def generate_questions(position, experience, skills):
     questions = []
-    for tech in tech_stack:
-        prompt = f"""<s>[INST] Generate 3 technical interview questions about {tech} 
-        suitable for a candidate with {experience} years of experience. 
-        Format as a numbered list without markdown.[/INST]"""
-        
-        for _ in range(MAX_RETRIES):
-            try:
-                response = requests.post(
-                    API_URL,
-                    headers={"Authorization": f"Bearer {HF_API_TOKEN}"},
-                    json={
-                        "inputs": prompt,
-                        "parameters": {
-                            "max_new_tokens": 300,
-                            "temperature": 0.7,
-                            "return_full_text": False
-                        }
-                    },
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    try:
-                        generated_text = response.json()[0]['generated_text']
-                        questions.append({
-                            "technology": tech,
-                            "questions": generated_text,
-                            "answers": [],
-                            "response_times": [],
-                            "start_time": None
-                        })
-                        break
-                    except (KeyError, IndexError, json.JSONDecodeError) as e:
-                        st.error(f"Failed to parse API response: {str(e)}")
-                        time.sleep(5)
-                        continue
-                elif response.status_code == 503:
-                    time.sleep(15)  # Wait for model to load
-                else:
-                    st.error(f"API Error ({response.status_code}): {response.text}")
-                    if response.status_code in [429, 502]:  # Rate limit or bad gateway
-                        time.sleep(30)
-                    continue
-            except requests.exceptions.RequestException as e:
-                st.error(f"Connection error: {str(e)}")
-                time.sleep(10)
+    position_attrs = POSITION_ATTRIBUTES.get(position, {})  # Allow custom position if not present
+    question_type = position_attrs.get("question_type", "general")
+    position_skills = position_attrs.get("skills", [])
     
+    combined_skills = list(set(skills + position_skills))
+    experience_level = "junior" if float(experience) < 3 else "mid-level" if float(experience) < 5 else "senior"
+    
+    if question_type == "technical":
+        prompt = (f"Generate 3 detailed technical interview questions for a {experience_level} {position} role. "
+                  f"Focus on these skills: {', '.join(combined_skills)}. "
+                  "Present each question as a numbered list.")
+    elif question_type == "behavioral":
+        prompt = (f"Generate 3 detailed behavioral interview questions for a {position} role. "
+                  "Emphasize leadership and management skills. Present the questions as a numbered list.")
+    elif question_type == "situational":
+        prompt = (f"Generate 3 detailed situational interview questions for a {position} role. "
+                  "Focus on real-world scenarios the candidate may face. Present as a numbered list.")
+    else:
+        prompt = (f"Generate 3 detailed interview questions for a {experience_level} {position} role. "
+                  f"Consider these skills: {', '.join(combined_skills)}. Present each question as a numbered list.")
+    
+    # Call API and handle empty response
+    result = call_hf_api(prompt)
+    if result.strip() == "":
+        st.error("Unable to generate interview questions after multiple attempts. Please try again later.")
+    else:
+        questions.append({
+            "position": position,
+            "experience_level": experience_level,
+            "question_type": question_type,
+            "questions": result,
+            "answers": []
+        })
     return questions
 
-# UI Components
-def render_technical_question_interface():
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        answer = st.text_area(
-            "**Write your answer (code supported):**",
-            height=200,
-            key=f"answer_{st.session_state.session['active_question_index']}",
-            help="Write your answer here. You can include code snippets using backticks."
-        )
-    with col2:
-        elapsed = time.time() - st.session_state.session["question_start_time"]
-        remaining = max(SESSION_TIMEOUT - elapsed, 0)
-        
-        st.metric("Time Remaining", f"{int(remaining // 60)}m {int(remaining % 60)}s")
-        st.progress(min(elapsed / SESSION_TIMEOUT, 1.0))
-        
-        if remaining <= 0:
-            st.warning("Time's up! Moving to next question.")
-            return None
+# --- UI Components ---
+def render_question_interface():
+    answer = st.text_area(
+        "**Write your answer (Character Count: {len_answer})**".format(
+            len_answer=len(st.session_state.get("user_answer", ""))
+        ),
+        height=200,
+        key=f"answer_{st.session_state.session['active_question_index']}",
+        help="Provide your detailed answer here. Type 'skip' to skip this question."
+    )
     return answer
 
 def render_sidebar():
     st.sidebar.header("Session Overview")
     st.sidebar.subheader("Progress")
     
-    # General progress
+    # Improved restart confirmation flow
+    if st.sidebar.button("Restart Session"):
+        with st.sidebar:
+            st.warning("Are you sure you want to restart?")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Confirm Restart"):
+                    with st.spinner("Starting new session..."):
+                        st.session_state.session = init_session_state()
+                        time.sleep(0.5)  # Give visual feedback
+                        st.rerun()
+            with col2:
+                if st.button("❌ Cancel"):
+                    pass  # Do nothing, just close the confirmation
+    
+    # Display progress based on candidate info & questions
     current_step = st.session_state.session["current_step"]
-    total_steps = len(steps) + len(st.session_state.session["tech_questions"])
+    total_steps = len(steps) + len(st.session_state.session["questions"])
     progress = (current_step / total_steps) if total_steps > 0 else 0
     st.sidebar.progress(progress)
-    
-    # Timing information
-    session_duration = time.time() - st.session_state.session["session_start"]
-    st.sidebar.metric("Session Duration", 
-                     f"{int(session_duration // 60)}m {int(session_duration % 60)}s")
-    
-    # Data controls
-    if st.sidebar.button("Restart Session"):
-        st.session_state.session = init_session_state()
-        st.rerun()
     
     st.sidebar.download_button(
         "Export Session Data",
@@ -185,27 +224,27 @@ def render_sidebar():
         mime="application/json"
     )
 
-# Conversation steps
+# --- Conversation Steps (Candidate Info Collection) ---
 steps = [
     {"prompt": "👋 Hello! I'm TalentScout Hiring Assistant. Let's start with your full name.", 
-     "key": "name", "validator": lambda x: len(x) >= 3, "timestamp": None},
+     "key": "name", "validator": lambda x: len(x.strip()) >= 3},
     {"prompt": "📧 What's your email address?", 
-     "key": "email", "validator": validate_email, "timestamp": None},
+     "key": "email", "validator": validate_email},
     {"prompt": "📱 Please share your phone number (international format):", 
-     "key": "phone", "validator": validate_phone, "timestamp": None},
+     "key": "phone", "validator": validate_phone},
     {"prompt": "⏳ How many years of professional experience do you have?", 
-     "key": "years_exp", "validator": validate_experience, "timestamp": None},
-    {"prompt": "💼 What position are you applying for?", 
-     "key": "desired_position", "validator": lambda x: len(x) >= 2, "timestamp": None},
+     "key": "years_exp", "validator": validate_experience},
+    {"prompt": "💼 What position are you applying for? (You may enter a custom role)", 
+     "key": "desired_position", "validator": lambda x: len(x.strip()) >= 2},
     {"prompt": "📍 Where are you currently located?", 
-     "key": "location", "validator": lambda x: len(x) >= 2, "timestamp": None},
-    {"prompt": "🛠️ List your technical expertise (comma-separated):\nExamples: Python, React, AWS", 
-     "key": "tech_stack", "validator": lambda x: len([t.strip() for t in x.split(",") if t.strip()]) >= 1, "timestamp": None},
+     "key": "location", "validator": lambda x: len(x.strip()) >= 2},
+    {"prompt": "🛠️ List your relevant skills (comma-separated):", 
+     "key": "skills", "validator": lambda x: len([s.strip() for s in x.split(",") if s.strip()]) >= 1},
 ]
 
-# Main UI
+# --- Main UI ---
 st.set_page_config(page_title="TalentScout AI Interviewer", page_icon="🤖")
-st.title("TalentScout AI Interview Assistant 🤖")
+st.title("TalentScout AI Interview Assistant🤖")
 render_sidebar()
 
 # Display chat history
@@ -213,141 +252,118 @@ for msg in st.session_state.session["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"], unsafe_allow_html=True)
 
-# Conversation flow management
+# --- Conversation Flow ---
 current_step = st.session_state.session["current_step"]
 
-# Handle technical questions
-if st.session_state.session["tech_questions"]:
+# Technical Question Phase: one question at a time with progress indicator
+if st.session_state.session["questions"]:
     q_idx = st.session_state.session["active_question_index"]
-    tech_q = st.session_state.session["tech_questions"][q_idx]
-    
-    if not tech_q["start_time"]:
-        st.session_state.session["tech_questions"][q_idx]["start_time"] = time.time()
-        st.session_state.session["question_start_time"] = time.time()
-        st.session_state.session["messages"].append({
-            "role": "assistant",
-            "content": f"**{tech_q['technology']} Questions:**\n{tech_q['questions']}",
-            "timestamp": time.time()
-        })
-        st.rerun()
-    
-    answer = render_technical_question_interface()
-    if answer:
-        # Record answer and timing
-        tech_q["answers"].append(answer)
-        response_time = time.time() - tech_q["start_time"]
-        tech_q["response_times"].append(response_time)
-        
-        # Record sentiment
-        sentiment = analyze_sentiment(answer)
-        st.session_state.session["candidate_info"]["sentiment"].append({
-            "question": tech_q['technology'],
-            "answer": answer,
-            "sentiment": sentiment
-        })
-        
-        # Move to next question
-        st.session_state.session["active_question_index"] += 1
-        if st.session_state.session["active_question_index"] >= len(st.session_state.session["tech_questions"]):
+    # Check bounds for questions list
+    if q_idx < len(st.session_state.session["questions"]):
+        question = st.session_state.session["questions"][q_idx]
+        if not question.get("asked", False):
+            st.session_state.session["questions"][q_idx]["asked"] = True
             st.session_state.session["messages"].append({
                 "role": "assistant",
-                "content": "✅ Thank you! We've received all your answers.",
-                "timestamp": time.time()
+                "content": f"**{question['position']} ({question['experience_level']}) Interview Questions:**\n{question['questions']}"
             })
-            save_candidate_data()
-            time.sleep(2)
-            st.session_state.session = init_session_state()
             st.rerun()
-        else:
-            st.session_state.session["question_start_time"] = time.time()
+        
+        answer = render_question_interface()
+        # Allow user to skip a question by entering "skip"
+        if answer and answer.lower().strip() == "skip":
+            st.session_state.session["messages"].append({
+                "role": "assistant",
+                "content": "⏭️ Question skipped."
+            })
+            st.session_state.session["active_question_index"] += 1
             st.rerun()
-
-# Handle normal conversation flow
+        elif answer and answer.lower().strip() != "":
+            question["answers"].append(answer)
+            st.session_state.session["messages"].append({
+                "role": "user",
+                "content": answer
+            })
+            st.session_state.session["active_question_index"] += 1
+            # If last question answered, show summary
+            if st.session_state.session["active_question_index"] >= len(st.session_state.session["questions"]):
+                st.session_state.session["messages"].append({
+                    "role": "assistant",
+                    "content": "✅ Thank you! Here is a summary of your answers:\n" +
+                               "\n".join([f"Q{i+1}: {q['answers']}" for i, q in enumerate(st.session_state.session["questions"])])
+                })
+                # Optionally, save candidate data here
+                st.session_state.session = init_session_state()
+                st.rerun()
+            else:
+                st.rerun()
+    else:
+        st.error("No questions available. Please try again later.")
+        
+# Candidate Info Collection Phase
 elif current_step < len(steps):
     step = steps[current_step]
-    
-    # Show current question if not already displayed
     if not any(m["content"] == step["prompt"] for m in st.session_state.session["messages"]):
-        step["timestamp"] = time.time()  # Record when question was asked
         st.session_state.session["messages"].append({
             "role": "assistant",
-            "content": step["prompt"],
-            "timestamp": time.time()
+            "content": step["prompt"]
         })
         st.rerun()
 
-# Input handling
+# --- Input Handling ---
 if user_input := st.chat_input("Type your response..."):
-    # Handle exit commands
     if user_input.lower() in ["exit", "quit", "end"]:
-        st.session_state.session["messages"].append({"role": "user", "content": user_input})
+        st.session_state.session["messages"].append({
+            "role": "user", 
+            "content": user_input
+        })
         st.session_state.session["messages"].append({
             "role": "assistant",
             "content": "👋 Thank you for your time! Your progress has been saved."
         })
-        save_candidate_data()
         st.session_state.session = init_session_state()
         st.rerun()
-    
-    # Handle technical answers (already handled above)
-    elif st.session_state.session["tech_questions"]:
+    elif st.session_state.session["questions"]:
+        # Question-answering phase is handled above
         pass
-    
-    # Handle normal conversation steps
     else:
         current_step = st.session_state.session["current_step"]
         step = steps[current_step]
-        
-        # Validate input
-        if not step["validator"](user_input):
-            error_msg = {
-                "name": "Please enter a valid name (min 3 characters)",
-                "email": "Invalid email format (example@domain.com)",
-                "phone": "Invalid phone number (use international format)",
-                "years_exp": "Please enter a valid number (0-50)",
-                "desired_position": "Please enter a valid position title",
-                "location": "Please enter a valid location",
-                "tech_stack": "Please enter at least one technology"
-            }.get(step["key"], "Invalid input")
-            st.error(error_msg)
+        # Sanitize the input (strip and html-escape)
+        sanitized_input = html.escape(user_input.strip())
+        if not step["validator"](sanitized_input):
+            st.session_state.session["invalid_attempts"].setdefault(step["key"], 0)
+            st.session_state.session["invalid_attempts"][step["key"]] += 1
+            if st.session_state.session["invalid_attempts"][step["key"]] > MAX_INVALID_ATTEMPTS:
+                st.error(f"Too many invalid attempts for {step['key']}. Exiting session for security.")
+                st.session_state.session = init_session_state()
+                st.rerun()
+            else:
+                error_msg = {
+                    "name": "Please enter a valid name (min 3 characters).",
+                    "email": "Invalid email format (example@domain.com).",
+                    "phone": "Invalid phone number (use international format).",
+                    "years_exp": "Please enter a valid number (0-50).",
+                    "desired_position": "Please enter a valid position title.",
+                    "location": "Please enter a valid location.",
+                    "skills": "Please enter at least one skill."
+                }.get(step["key"], "Invalid input.")
+                st.error(error_msg)
         else:
-            # Store valid response
-            st.session_state.session["candidate_info"][step["key"]] = user_input
+            st.session_state.session["candidate_info"][step["key"]] = sanitized_input
             st.session_state.session["messages"].append({
-                "role": "user", 
-                "content": user_input,
-                "timestamp": time.time()
+                "role": "user",
+                "content": sanitized_input
             })
-            
-            # Record timing
-            if current_step > 0:
-                prev_step = steps[current_step-1]
-                response_time = time.time() - prev_step["timestamp"]
-                st.session_state.session["candidate_info"]["timings"][prev_step["key"]] = response_time
-            
-            # Move to next step
             st.session_state.session["current_step"] += 1
-            
-            # Generate questions when all info collected
+            # When all candidate info is collected, generate interview questions
             if st.session_state.session["current_step"] == len(steps):
-                tech_stack = [t.strip() for t in 
-                    st.session_state.session["candidate_info"]["tech_stack"].split(",")]
+                skills = [s.strip() for s in st.session_state.session["candidate_info"]["skills"].split(",") if s.strip()]
                 years_exp = st.session_state.session["candidate_info"]["years_exp"]
-                
-                with st.spinner("🔍 Generating technical questions..."):
-                    st.session_state.session["tech_questions"] = generate_technical_questions(
-                        tech_stack, years_exp
+                position = st.session_state.session["candidate_info"]["desired_position"]
+                with st.spinner("🔍 Generating interview questions..."):
+                    st.session_state.session["questions"] = generate_questions(
+                        position, years_exp, skills
                     )
                     st.session_state.session["active_question_index"] = 0
-                    st.session_state.session["question_start_time"] = time.time()
             st.rerun()
-
-# Session timeout handling
-if (time.time() - st.session_state.session["session_start"]) > 3600:  # 1 hour timeout
-    st.session_state.session["messages"].append({
-        "role": "assistant",
-        "content": "⏳ Session timed out due to inactivity. Please start a new session."
-    })
-    save_candidate_data()
-    st.session_state.session = init_session_state()
-    st.rerun()
