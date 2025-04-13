@@ -8,19 +8,16 @@ import requests
 from dotenv import load_dotenv
 from functools import wraps
 
-# Load environment variables
 load_dotenv()
 
-# Configuration constants
 HF_API_TOKEN = os.getenv('HF_API_TOKEN')
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.1"
 API_URL = f"https://api-inference.huggingface.co/models/{MODEL_NAME}"
 DATA_FILE = "candidates.json"
 MAX_RETRIES = 3
 MAX_INVALID_ATTEMPTS = 2
-INITIAL_BACKOFF = 5  # seconds
+INITIAL_BACKOFF = 5  
 
-# Position categories and attributes remain as before
 POSITION_CATEGORIES = {
     "Technical": [
         "Software Engineer", "Data Scientist", "DevOps Engineer",
@@ -56,7 +53,6 @@ POSITION_ATTRIBUTES = {
     }
 }
 
-# --- Caching Decorator for API Responses ---
 def cache_api_call(func):
     cache = {}
     @wraps(func)
@@ -104,7 +100,6 @@ def call_hf_api(prompt):
             backoff *= 2
     return ""  # Fallback: return empty string after MAX_RETRIES
 
-# --- Session State Initialization ---
 def init_session_state():
     return {
         "messages": [],
@@ -129,7 +124,6 @@ def init_session_state():
 if "session" not in st.session_state:
     st.session_state.session = init_session_state()
 
-# --- Validation Functions ---
 def validate_email(email):
     return re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", email)
 
@@ -142,10 +136,11 @@ def validate_experience(years):
     except ValueError:
         return False
 
-# --- Generate Interview Questions ---
 def generate_questions(position, experience, skills):
     questions = []
-    position_attrs = POSITION_ATTRIBUTES.get(position, {})  # Allow custom position if not present
+    if not position.strip():
+        position = "General Role"
+    position_attrs = POSITION_ATTRIBUTES.get(position, {})
     question_type = position_attrs.get("question_type", "general")
     position_skills = position_attrs.get("skills", [])
     
@@ -166,7 +161,6 @@ def generate_questions(position, experience, skills):
         prompt = (f"Generate 3 detailed interview questions for a {experience_level} {position} role. "
                   f"Consider these skills: {', '.join(combined_skills)}. Present each question as a numbered list.")
     
-    # Call API and handle empty response
     result = call_hf_api(prompt)
     if result.strip() == "":
         st.error("Unable to generate interview questions after multiple attempts. Please try again later.")
@@ -180,12 +174,10 @@ def generate_questions(position, experience, skills):
         })
     return questions
 
-# --- UI Components ---
 def render_question_interface():
+    current_answer = st.session_state.get("user_answer", "")
     answer = st.text_area(
-        "**Write your answer (Character Count: {len_answer})**".format(
-            len_answer=len(st.session_state.get("user_answer", ""))
-        ),
+        "**Write your answer (Character Count: {}):**".format(len(current_answer)),
         height=200,
         key=f"answer_{st.session_state.session['active_question_index']}",
         help="Provide your detailed answer here. Type 'skip' to skip this question."
@@ -203,15 +195,12 @@ def render_sidebar():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ Confirm Restart"):
-                    with st.spinner("Starting new session..."):
-                        st.session_state.session = init_session_state()
-                        time.sleep(0.5)  # Give visual feedback
-                        st.rerun()
+                    st.session_state.session = init_session_state()
+                    st.rerun()
             with col2:
                 if st.button("❌ Cancel"):
-                    pass  # Do nothing, just close the confirmation
+                    pass
     
-    # Display progress based on candidate info & questions
     current_step = st.session_state.session["current_step"]
     total_steps = len(steps) + len(st.session_state.session["questions"])
     progress = (current_step / total_steps) if total_steps > 0 else 0
@@ -224,7 +213,6 @@ def render_sidebar():
         mime="application/json"
     )
 
-# --- Conversation Steps (Candidate Info Collection) ---
 steps = [
     {"prompt": "👋 Hello! I'm TalentScout Hiring Assistant. Let's start with your full name.", 
      "key": "name", "validator": lambda x: len(x.strip()) >= 3},
@@ -242,23 +230,18 @@ steps = [
      "key": "skills", "validator": lambda x: len([s.strip() for s in x.split(",") if s.strip()]) >= 1},
 ]
 
-# --- Main UI ---
 st.set_page_config(page_title="TalentScout AI Interviewer", page_icon="🤖")
-st.title("TalentScout AI Interview Assistant🤖")
+st.title("TalentScout AI Interview Assistant 🤖")
 render_sidebar()
 
-# Display chat history
 for msg in st.session_state.session["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"], unsafe_allow_html=True)
 
-# --- Conversation Flow ---
 current_step = st.session_state.session["current_step"]
 
-# Technical Question Phase: one question at a time with progress indicator
 if st.session_state.session["questions"]:
     q_idx = st.session_state.session["active_question_index"]
-    # Check bounds for questions list
     if q_idx < len(st.session_state.session["questions"]):
         question = st.session_state.session["questions"][q_idx]
         if not question.get("asked", False):
@@ -270,7 +253,6 @@ if st.session_state.session["questions"]:
             st.rerun()
         
         answer = render_question_interface()
-        # Allow user to skip a question by entering "skip"
         if answer and answer.lower().strip() == "skip":
             st.session_state.session["messages"].append({
                 "role": "assistant",
@@ -285,14 +267,12 @@ if st.session_state.session["questions"]:
                 "content": answer
             })
             st.session_state.session["active_question_index"] += 1
-            # If last question answered, show summary
             if st.session_state.session["active_question_index"] >= len(st.session_state.session["questions"]):
                 st.session_state.session["messages"].append({
                     "role": "assistant",
                     "content": "✅ Thank you! Here is a summary of your answers:\n" +
                                "\n".join([f"Q{i+1}: {q['answers']}" for i, q in enumerate(st.session_state.session["questions"])])
                 })
-                # Optionally, save candidate data here
                 st.session_state.session = init_session_state()
                 st.rerun()
             else:
@@ -300,7 +280,6 @@ if st.session_state.session["questions"]:
     else:
         st.error("No questions available. Please try again later.")
         
-# Candidate Info Collection Phase
 elif current_step < len(steps):
     step = steps[current_step]
     if not any(m["content"] == step["prompt"] for m in st.session_state.session["messages"]):
@@ -310,7 +289,6 @@ elif current_step < len(steps):
         })
         st.rerun()
 
-# --- Input Handling ---
 if user_input := st.chat_input("Type your response..."):
     if user_input.lower() in ["exit", "quit", "end"]:
         st.session_state.session["messages"].append({
@@ -324,12 +302,10 @@ if user_input := st.chat_input("Type your response..."):
         st.session_state.session = init_session_state()
         st.rerun()
     elif st.session_state.session["questions"]:
-        # Question-answering phase is handled above
-        pass
+        pass  # Question-answering phase is handled above
     else:
         current_step = st.session_state.session["current_step"]
         step = steps[current_step]
-        # Sanitize the input (strip and html-escape)
         sanitized_input = html.escape(user_input.strip())
         if not step["validator"](sanitized_input):
             st.session_state.session["invalid_attempts"].setdefault(step["key"], 0)
@@ -356,7 +332,6 @@ if user_input := st.chat_input("Type your response..."):
                 "content": sanitized_input
             })
             st.session_state.session["current_step"] += 1
-            # When all candidate info is collected, generate interview questions
             if st.session_state.session["current_step"] == len(steps):
                 skills = [s.strip() for s in st.session_state.session["candidate_info"]["skills"].split(",") if s.strip()]
                 years_exp = st.session_state.session["candidate_info"]["years_exp"]
