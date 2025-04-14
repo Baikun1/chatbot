@@ -104,7 +104,7 @@ def init_session_state():
     return {
         "messages": [],
         "current_step": 0,
-        "invalid_attempts": {},
+        "invalid_attempts": {},  
         "candidate_info": {
             "name": "",
             "email": "",
