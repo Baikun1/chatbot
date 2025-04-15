@@ -96,7 +96,7 @@ def call_hf_api(prompt):
             backoff *= 2  
         except requests.exceptions.RequestException as e:
             st.error(f"Connection error: {str(e)}")
-            time.sleep(backoff)
+            time.sleep(backoff) 
             backoff *= 2
     return ""  # Fallback: return empty string after MAX_RETRIES
 
