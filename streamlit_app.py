@@ -93,7 +93,7 @@ def call_hf_api(prompt):
             else:
                 st.error(f"API Error ({response.status_code}): {response.text}")
             time.sleep(backoff)
-            backoff *= 2  
+            backoff *= 2   
         except requests.exceptions.RequestException as e:
             st.error(f"Connection error: {str(e)}")
             time.sleep(backoff) 
